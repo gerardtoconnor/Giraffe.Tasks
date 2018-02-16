@@ -16,6 +16,8 @@ namespace Giraffe
 open System
 open System.Threading.Tasks
 open System.Runtime.CompilerServices
+open System.ComponentModel
+open Test
 
 // This module is not really obsolete, but it's not intended to be referenced directly from user code.
 // However, it can't be private because it is used within inline functions that *are* user-visible.
@@ -23,13 +25,14 @@ open System.Runtime.CompilerServices
 [<Obsolete>]
 module TaskBuilder =
 
-    type AwaitPass =
-        struct
-            val awt  : ICriticalNotifyCompletion
-            val next : unit -> AwaitPass
-        end
-        new (awt,next) = { awt = awt ; next = next } 
-
+    // type AwaitPass =
+    //     struct
+    //         val awt  : ICriticalNotifyCompletion
+    //         val next : unit -> AwaitPass
+    //     end
+    //     new (awt,next) = { awt = awt ; next = next }
+    //     static member Zero = Unchecked.defaultof<AwaitPass>
+    //     static member inline IsZero (v:AwaitPass) = Object.ReferenceEquals(null,v.awt)
 
     /// Represents the state of a computation:
     /// either awaiting something with a continuation,
@@ -41,9 +44,6 @@ module TaskBuilder =
     //     | ReturnFrom of 'a Task
     // Implements the machinery of running a `Step<'m, 'm>` as a task returning a continuation task.
 
-
-
-
     type StepStateMachine<'a>() as this =
         let methodBuilder = AsyncTaskMethodBuilder<'a>()
         /// The continuation we left off awaiting on our last MoveNext().
@@ -51,44 +51,128 @@ module TaskBuilder =
         /// Returns next pending awaitable or null if exiting (including tail call).
         let mutable self = this
 
-        let mutable curAwait = Unchecked.defaultof<ICriticalNotifyCompletion>
+        let mutable awaiter = Unchecked.defaultof<ICriticalNotifyCompletion>
         
         /// Start execution as a `Task<'a>`.
-        member __.Run(awt: ICriticalNotifyCompletion,next) =
-            let mutable curAwait = awt
+        member __.Run(awt,next) =
+            awaiter <- awt
             continuation <- next
-
             methodBuilder.Start(&self)
-            methodBuilder.AwaitUnsafeOnCompleted(&curAwait, &self) // set up initial wait
             methodBuilder.Task
-
-        member __.Await(awt,next) =
-            continuation <- next
-            
+        member inline __.Result(v:'a) = methodBuilder.SetResult(v)        
 
         member __.MethodBuilder = methodBuilder
 
         interface IAsyncStateMachine with
             /// Proceed to one of three states: result, failure, or awaiting.
             /// If awaiting, MoveNext() will be called again when the awaitable completes.
-            member __.MoveNext() =
+            member x.MoveNext() =
                 try
-                    let awp = continuation()
+                    let ap = continuation() // runs cont, will update awaiter & continuation
+                    awaiter <- ap.awt
+                    continuation <- ap.next
 
-                    // match continuation() with
-                    // | Return r ->
-                    //     methodBuilder.SetResult(Task.FromResult(r))
-                    // | ReturnFrom t ->
-                    //     methodBuilder.SetResult(t)
-                    // | Await (await, next) ->
-                    //curAwait <- awp.awt  // HACK !?!
-                    continuation <- awp.next
-                    methodBuilder.AwaitUnsafeOnCompleted(&awp.awt, &self)
+                    //(x :> IAsyncStateMachine).MoveNext()
+
+                    methodBuilder.AwaitUnsafeOnCompleted(&awaiter, &self)
                 with
                     | exn ->
                         methodBuilder.SetException(exn)
 
             member __.SetStateMachine(_) = () // Doesn't really apply since we're a reference type.
+
+    [<Struct>]
+    type TypedStateStep< ^awt, ^inp, 'a when ^awt : (member GetResult : unit -> ^inp) and ^awt : not struct >
+            (awaiter: ^awt ,continuation: ^inp -> unit ,methodBuilder:AsyncTaskMethodBuilder<'a>) =
+                
+                    interface IAsyncStateMachine with
+                        member __.SetStateMachine sm = methodBuilder.SetStateMachine sm
+                        member __.MoveNext() =
+                            continuation (^awt : (member GetResult : unit -> ^inp)(awaiter))
+
+   
+        
+    // type TypedStateStep2< ^awt, ^inp, 'a when ^awt : (member GetResult : unit -> ^inp) > =
+    //     struct
+    //         val awaiter: ^awt
+    //         val continuation: ^inp -> unit
+    //         val methodBuilder: AsyncTaskMethodBuilder<'a>
+    //     end
+    //     new (awaiter: ^awt ,continuation: ^inp -> unit ,methodBuilder:AsyncTaskMethodBuilder<'a>) = { awaiter = awaiter ; continuation = continuation ; methodBuilder = methodBuilder }
+            // with interface IAsyncStateMachine with
+            //     /// Proceed to one of three states: result, failure, or awaiting.
+            //     /// If awaiting, MoveNext() will be called again when the awaitable completes.
+            //     member __.MoveNext() =
+            //         try
+            //             continuation (^awt : (member GetResult : unit -> ^inp)(awaiter))
+                        
+            //         with
+            //             | exn ->
+            //                 methodBuilder.SetException(exn)
+
+            //     member __.SetStateMachine sm = methodBuilder.SetStateMachine sm
+
+    [<Struct>]
+    type TypedStateStep<'T,'a >(awaiter:TaskAwaiter<'T> ,continuation:'T -> unit,methodBuilder:AsyncTaskMethodBuilder<'a>) =
+        interface IAsyncStateMachine with
+            /// Proceed to one of three states: result, failure, or awaiting.
+            /// If awaiting, MoveNext() will be called again when the awaitable completes.
+            member __.MoveNext() =
+                try
+                    continuation ( awaiter.GetResult() )   // runs cont, will update awaiter & continuation
+                    
+                with
+                    | exn ->
+                        methodBuilder.SetException(exn)
+
+            member __.SetStateMachine sm = methodBuilder.SetStateMachine sm // Doesn't really apply since we're a reference type.
+
+    // [<Struct>]
+    // type InitStateStep< ^awt, ^inp
+    //                         when ^awt :> ICriticalNotifyCompletion
+    //                         and ^awt : (member GetResult : unit -> ^inp) >
+    //     (awaiter: ^awt ,continuation: ^inp -> unit,target: byref<ICriticalNotifyCompletion> : methodBuilder ) =
+    //             interface IAsyncStateMachine with
+    //                 member __.MoveNext() =
+
+    //                 member __.SetStateMachine sm = methodBuilder.SetStateMachine sm 
+    
+    type StateMachine<'a>() =
+        let methodBuilder = AsyncTaskMethodBuilder<'a>()
+        let mutable awaiter = Unchecked.defaultof<ICriticalNotifyCompletion>
+        let mutable stateStep = Unchecked.defaultof<IAsyncStateMachine>
+
+        member inline __.Run< ^awt, ^inp
+                                    when ^awt :> ICriticalNotifyCompletion
+                                    and ^awt : (member GetResult : unit -> ^inp) >
+            (awt : ^awt, next : ^inp -> unit) =
+
+            stateStep <- 
+                { new IAsyncStateMachine with 
+                        member __.MoveNext() =
+                            awaiter <- awt
+                            stateStep <- TypedStateStep<_,_,'a>(awt,next,methodBuilder)
+                            methodBuilder.AwaitUnsafeOnCompleted(&awaiter, &stateStep)
+                        member __.SetStateMachine sm = methodBuilder.SetStateMachine sm
+                }
+            methodBuilder.Start(&stateStep)
+            methodBuilder.SetResult
+
+        member inline __.Await< ^awt, ^inp
+                                    when ^awt :> ICriticalNotifyCompletion
+                                    and ^awt : (member GetResult : unit -> ^inp) >
+            (awt : ^awt, next : ^inp -> unit) : unit =
+                awaiter <- awt                
+                stateStep <- TypedStateStep<_,_,'a>(awt,next,methodBuilder)
+                methodBuilder.AwaitUnsafeOnCompleted(&awaiter, &stateStep)                
+                    //continuation (^awt : (member GetResult : unit -> ^inp)(awt))
+
+            
+
+
+        member __.Result(v:'a) =
+            methodBuilder.SetResult(v)
+
 
     let unwrapException (agg : AggregateException) =
         let inners = agg.InnerExceptions
@@ -121,24 +205,13 @@ module TaskBuilder =
                                             and ^awt :> ICriticalNotifyCompletion
                                             and ^awt : (member get_IsCompleted : unit -> bool)
                                             and ^awt : (member GetResult : unit -> ^inp) >
-            (abl : ^abl, continuation : ^inp -> AwaitPass) : AwaitPass =
+            (abl : ^abl, continuation : ^inp -> unit, sm : StateMachine<'out>) : unit =
                 let awt = (^abl : (member GetAwaiter : unit -> ^awt)(abl)) // get an awaiter from the awaitable
                 if (^awt : (member get_IsCompleted : unit -> bool)(awt)) then // shortcut to continue immediately
                     continuation (^awt : (member GetResult : unit -> ^inp)(awt))
                 else
-                    AwaitPass(awt, fun () -> continuation (^awt : (member GetResult : unit -> ^inp)(awt)))
-
-        static member inline GenericAwaitUnit< ^abl, ^awt, ^inp
-                                            when ^abl : (member GetAwaiter : unit -> ^awt)
-                                            and ^awt :> ICriticalNotifyCompletion
-                                            and ^awt : (member get_IsCompleted : unit -> bool)
-                                            and ^awt : (member GetResult : unit -> unit) >
-            (abl : ^abl, continuation : unit -> AwaitPass) : AwaitPass =
-                let awt = (^abl : (member GetAwaiter : unit -> ^awt)(abl)) // get an awaiter from the awaitable
-                if (^awt : (member get_IsCompleted : unit -> bool)(awt)) then // shortcut to continue immediately
-                    continuation ()
-                else
-                    AwaitPass(awt, fun () -> continuation ())
+                    sm.Await(awt,continuation)
+                    //AwaitPass(awt, fun () -> continuation (^awt : (member GetResult : unit -> ^inp)(awt)))
 
         static member inline GenericAwaitConfigureFalse< ^tsk, ^abl, ^awt, ^inp
                                                         when ^tsk : (member ConfigureAwait : bool -> ^abl)
@@ -150,69 +223,69 @@ module TaskBuilder =
                 let abl = (^tsk : (member ConfigureAwait : bool -> ^abl)(tsk, false))
                 Binder<'out>.GenericAwait(abl, continuation)
 
-        static member inline GenericAwaitUnitConfigureFalse< ^tsk, ^abl, ^awt, ^inp
-                                                        when ^tsk : (member ConfigureAwait : bool -> ^abl)
-                                                        and ^abl : (member GetAwaiter : unit -> ^awt)
-                                                        and ^awt :> ICriticalNotifyCompletion
-                                                        and ^awt : (member get_IsCompleted : unit -> bool)
-                                                        and ^awt : (member GetResult : unit -> unit) >
-            (tsk : ^tsk, continuation : unit -> AwaitPass) : AwaitPass =
-                let abl = (^tsk : (member ConfigureAwait : bool -> ^abl)(tsk, false))
-                Binder<'out>.GenericAwaitUnit(abl, continuation)
+    // new testing
+    //////////////////////////
 
-
+        static member inline GenericAwaitResult< ^abl, ^awt, ^inp
+                                            when ^abl : (member GetAwaiter : unit -> ^awt)
+                                            and ^awt :> ICriticalNotifyCompletion
+                                            and ^awt : (member get_IsCompleted : unit -> bool)
+                                            and ^awt : (member GetResult : unit -> ^inp) >
+            (abl : ^abl, continuation : ^inp -> 'out,sm : StepStateMachine< 'out>) : unit =
+                let awt = (^abl : (member GetAwaiter : unit -> ^awt)(abl)) // get an awaiter from the awaitable
+                if (^awt : (member get_IsCompleted : unit -> bool)(awt)) then // shortcut to continue immediately
+                    sm.Result(continuation (^awt : (member GetResult : unit -> ^inp)(awt)))
+                else
+                    sm.Await(awt,fun () ->  sm.Result(continuation (^awt : (member GetResult : unit -> ^inp)(awt))))
 
     /// Special case of the above for `Task<'a>`. Have to write this out by hand to avoid confusing the compiler
     /// trying to decide between satisfying the constraints with `Task` or `Task<'a>`.
-    let inline bindTask (task : 'a Task,continuation : 'a -> AwaitPass) =
-        let awt = task.GetAwaiter()
-        if awt.IsCompleted then // Proceed to the next step based on the result we already have.
-            continuation(awt.GetResult())
-        else // Await and continue later when a result is available.
+    // let inline bindTask (task : 'a Task,continuation : 'a -> AwaitPass) =
+    //     let awt = task.GetAwaiter()
+    //     if awt.IsCompleted then // Proceed to the next step based on the result we already have.
+    //         continuation(awt.GetResult())
+    //     else // Await and continue later when a result is available.
 
-            AwaitPass(awt, (fun () -> continuation(awt.GetResult())))
+    //         AwaitPass(awt, (fun () -> continuation(awt.GetResult())))
 
     /// Special case of the above for `Task<'a>`, for the context-insensitive builder.
     /// Have to write this out by hand to avoid confusing the compiler thinking our built-in bind method
     /// defined on the builder has fancy generic constraints on inp and out parameters.
-    let inline bindTaskConfigureFalse (task : 'a Task) (continuation : 'a -> AwaitPass) =
-        let awt = task.ConfigureAwait(false).GetAwaiter()
-        if awt.IsCompleted then // Proceed to the next step based on the result we already have.
-            continuation(awt.GetResult())
-        else // Await and continue later when a result is available.
-            AwaitPass(awt, (fun () -> continuation(awt.GetResult())))
+    // let inline bindTaskConfigureFalse (task : 'a Task) (continuation : 'a -> AwaitPass) =
+    //     let awt = task.ConfigureAwait(false).GetAwaiter()
+    //     if awt.IsCompleted then // Proceed to the next step based on the result we already have.
+    //         continuation(awt.GetResult())
+    //     else // Await and continue later when a result is available.
+    //         AwaitPass(awt, (fun () -> continuation(awt.GetResult())))
 
     /// Chains together a step with its following step.
     /// Note that this requires that the first step has no result.
     /// This prevents constructs like `task { return 1; return 2; }`.
-    let rec combine (step : AwaitPass) (continuation : unit -> AwaitPass) =
-        AwaitPass (step.awt, fun () -> combine (step.next()) continuation)
 
     /// Builds a step that executes the body while the condition predicate is true.
-    // let whileLoop (cond : unit -> bool) (body : unit -> AwaitPass) =
-    //     if cond() then
-    //         // Create a self-referencing closure to test whether to repeat the loop on future iterations.
-    //         let rec repeat () =
-    //             if cond() then
-    //                 let body = body()
-    //                 AwaitPass (body.awt, fun () -> combine (body.next()) repeat)
-    //             else zero
-    //         // Run the body the first time and chain it to the repeat logic.
-    //         combine (body()) repeat
-    //     else zero
+    let whileLoop (cond : unit -> bool) (body : unit -> AwaitPass) =
+        if cond() then
+            // Create a self-referencing closure to test whether to repeat the loop on future iterations.
+            let rec repeat () =                
+                if cond() then
+                    let body = body()
+                    AwaitPass (body.awt, fun () -> combine (body.next()) repeat)
+                else AwaitPass.Zero
+            // Run the body the first time and chain it to the repeat logic.
+            combine (body()) repeat
+        else AwaitPass.Zero
 
     /// Wraps a step in a try/with. This catches exceptions both in the evaluation of the function
     /// to retrieve the step, and in the continuation of the step (if any).
-    let rec tryWith(step : unit -> AwaitPass) (catch : exn -> AwaitPass) =
+    let rec tryWith(step : unit -> unit) (catch : exn -> unit) =
         try
-            let body = step()
-            AwaitPass (body.awt, fun () -> tryWith (body.next) catch)
+            step()
         with
         | exn -> catch exn
 
     /// Wraps a step in a try/finally. This catches exceptions both in the evaluation of the function
     /// to retrieve the step, and in the continuation of the step (if any).
-    let rec tryFinally (step : unit -> AwaitPass) fin =
+    let rec tryFinally (step : unit -> unit) fin =
         let step =
             try step()
             // Important point: we use a try/with, not a try/finally, to implement tryFinally.
@@ -263,15 +336,16 @@ module TaskBuilder =
         // Unfortunately, inline members do not work with inheritance.
         let mutable stateMachine = Unchecked.defaultof<StepStateMachine<'r>> //lazy
         member inline __.Delay(f : unit -> _) = f
-        member inline __.Run(f : unit -> AwaitPass) = 
+        member inline __.Run(f : unit -> unit) = 
             stateMachine <- StepStateMachine<'r>()
-            let body = f()
-            stateMachine.Run(body.awt,body.next)
+            f()
+            stateMachine.Run()
         member inline __.Run(f : unit -> Task<'r>) = f()
+        member inline __.Run(f : unit -> 'r) = Task.FromResult (f())
 
         member inline __.Zero() = zero
-        member inline __.Return(x) = x
-        member inline __.ReturnFrom(task : _ Task) = task
+        member inline __.Return(x:'r) = x
+        member inline __.ReturnFrom(task : 'r Task) = task
         member inline __.Combine(step : AwaitPass, continuation) = combine step continuation
         // member inline __.While(condition : unit -> bool, body : unit -> AwaitPass) = whileLoop condition body
         // member inline __.For(sequence : _ seq, body : _ -> AwaitPass) = forLoop sequence body
@@ -281,15 +355,23 @@ module TaskBuilder =
         // End of consistent methods -- the following methods are different between
         // `TaskBuilder` and `ContextInsensitiveTaskBuilder`!
 
+        member inline this.Bind(configurableTaskLike, continuation : 'a -> AwaitPass) : AwaitPass =
+            Binder<'r>.GenericAwaitConfigureFalse(configurableTaskLike, continuation,stateMachine)
+
+        member inline this.Bind(configurableTaskLike, continuation : 'a -> 'r ) : unit =
+            Binder<'r>.GenericAwaitResult(configurableTaskLike, continuation,stateMachine)
+
+
         // We have to have a dedicated overload for Task<'a> so the compiler doesn't get confused.
         // Everything else can use bindGenericAwaitable via an extension member (defined later).
-        member inline __.Bind(task : 'a Task, continuation : 'a -> AwaitPass) : AwaitPass =
-            bindTaskConfigureFalse task continuation
+        // member inline __.Bind(task : 'a Task, continuation : 'a -> AwaitPass) : AwaitPass =
+        //     bindTaskConfigureFalse task continuation
+
 
         // Async overload bind
-        member inline __.Bind(work : 'a Async, continuation : 'a -> AwaitPass) : AwaitPass =
-            let task = Async.StartAsTask work
-            bindTaskConfigureFalse task continuation
+        // member inline __.Bind(work : 'a Async, continuation : 'a -> AwaitPass) : AwaitPass =
+        //     let task = Async.StartAsTask work
+        //     bindTaskConfigureFalse task continuation
 
 
     type ContextInsensitiveTaskBuilder(ssm:StepStateMachine<_>) =
@@ -353,10 +435,6 @@ module Tasks =
         type TaskBuilder.ContextInsensitiveTaskBuilder with
             member inline this.ReturnFrom(configurableTaskLike) =
                 TaskBuilder.Binder<_>.GenericAwaitConfigureFalse(configurableTaskLike, TaskBuilder.ret)
-            member inline this.ReturnFrom(configurableTaskLike) =
-                TaskBuilder.Binder<_>.GenericAwaitUnitConfigureFalse(configurableTaskLike, TaskBuilder.ret)
             
             member inline this.Bind(configurableTaskLike, continuation : _ -> 'a TaskBuilder.Step) : 'a TaskBuilder.Step =
                 TaskBuilder.Binder<'a>.GenericAwaitConfigureFalse(configurableTaskLike, continuation)
-            member inline this.Bind(configurableTaskLike, continuation : _ -> 'a TaskBuilder.Step) : 'a TaskBuilder.Step =
-                TaskBuilder.Binder<'a>.GenericAwaitUnitConfigureFalse(configurableTaskLike, continuation)
