@@ -9,13 +9,21 @@ module TaskBuilder =
     [<Struct>]
     type TypedStateStep< ^awt, ^inp, 'a when ^awt : (member GetResult : unit -> ^inp) >
         (awaiter: ^awt ,continuation: ^inp -> unit ,methodBuilder:AsyncTaskMethodBuilder<'a>) =
-
             interface IAsyncStateMachine with
-                member __.MoveNext() =
-                    continuation (^awt : (member GetResult : unit -> ^inp)(awaiter))
+                member __.MoveNext () = ()
+                    //continuation (^awt : (member GetResult : unit -> ^inp)(awaiter))
                 member __.SetStateMachine sm = methodBuilder.SetStateMachine sm
+            //static member Bind< ^awt,^inp,'a>(tss : TypedStateStep< ^awt,^inp','a'>) =
+                
+    type Test< ^awt, ^inp, 'a when ^awt : (member GetResult : unit -> ^inp)> =
+        struct
+            val awaiter : ^awt
+            val continuation : ^inp -> unit
+        end        
+        
+    let testVal = Test()                         
 
-                            
+    testVal.
 
     [<Struct;Obsolete>]
     type TypedStateAwaiter<'T,'a >(awaiter:TaskAwaiter<'T> ,continuation:'T -> unit,methodBuilder:AsyncTaskMethodBuilder<'a>) =
