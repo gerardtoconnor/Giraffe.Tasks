@@ -10,10 +10,11 @@ type ValPass<'T> =
         val None : bool
     end    
     new (v,s,n) = {Value = v ; State = s ; None = n }
+
     
 type TraceBuilder() =
 
-    member inline __.Bind(m : 'T option, f) = 
+    member inline __.Bind(m : 'T option, f ) = 
         match m with 
         | Some v -> v |> f
         | None -> None

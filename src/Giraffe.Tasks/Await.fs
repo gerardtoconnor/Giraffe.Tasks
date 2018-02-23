@@ -1,3 +1,4 @@
+namespace GTOC
 
 open System
 open System.Threading.Tasks
@@ -5,22 +6,19 @@ open System.Runtime.CompilerServices
 open System.Threading
 
 
-
 [<Obsolete>]
 module TaskBuilder =
-
-    type TypePass<'T> = struct end                   
+                 
 
     [<Struct>]
-    type TypedGenericStateAwaiter<'T,'r >(awaiter:TaskAwaiter<'T> ,continuation:'T -> TypePass<'r>,methodBuilder:AsyncTaskMethodBuilder<'r>) =
+    type TypedGenericStateAwaiter<'T,'r >(awaiter:TaskAwaiter<'T> ,continuation:'T -> unit,methodBuilder:AsyncTaskMethodBuilder<'r>) =
         interface IAsyncStateMachine with
             member __.MoveNext() =
-                    continuation ( awaiter.GetResult() ) |> ignore  // runs cont, will update awaiter & continuation
-            member __.SetStateMachine (_) = () 
-            ) =sm = methodBuilder.SetStateMachine sm 
+                    continuation ( awaiter.GetResult() )   // runs cont, will update awaiter & continuation
+            member __.SetStateMachine sm = methodBuilder.SetStateMachine sm 
     
     [<Struct>]
-    type TypedPlainStateAwaiter<'r >(continuation:unit -> TypePass<'r>,methodBuilder:AsyncTaskMethodBuilder<'r>) =
+    type TypedPlainStateAwaiter<'r >(continuation:unit -> unit,methodBuilder:AsyncTaskMethodBuilder<'r>) =
         interface IAsyncStateMachine with
             member __.MoveNext() =
                     continuation () |> ignore  // runs cont, will update awaiter & continuation
@@ -32,7 +30,7 @@ module TaskBuilder =
         let mutable stateStep = Unchecked.defaultof<IAsyncStateMachine>
         let cts = new CancellationTokenSource()
 
-        member __.Run< 'r>(fn:unit -> TypePass< 'r>) =
+        member __.Run< 'r>(fn:unit -> unit) =
             stateStep <- // set 
                 { new IAsyncStateMachine with 
                         member __.MoveNext() = ()
@@ -42,18 +40,18 @@ module TaskBuilder =
             fn() |> ignore //fn will call .Await and set new awiater & 
             methodBuilder.Task
 
-        member inline __.Await<'T>(awt : TaskAwaiter<'T>, next : 'T -> TypePass<'r>) : unit =
+        member __.Await<'T>(awt : TaskAwaiter<'T>, next : 'T -> unit) : unit =
                 awaiter <- awt                
                 stateStep <- TypedGenericStateAwaiter<'T,'r>(awt,next,methodBuilder)
                 methodBuilder.AwaitUnsafeOnCompleted(&awaiter, &stateStep)                
                     //continuation (^awt : (member GetResult : unit -> ^inp)(awt))
 
-        member inline __.Await(awt : TaskAwaiter, next : unit -> TypePass<'r>) : unit =
+        member __.Await(awt : TaskAwaiter, next : unit -> unit) : unit =
                 awaiter <- awt                
                 stateStep <- TypedPlainStateAwaiter(next,methodBuilder)
                 methodBuilder.AwaitUnsafeOnCompleted(&awaiter, &stateStep)               
 
-        member inline __.Await(t:Task< 'r>) : unit =
+        member __.Await(t:Task< 'r>) : unit =
             awaiter <- t.GetAwaiter()
             stateStep <- { new IAsyncStateMachine with 
                     member __.MoveNext() = methodBuilder.SetResult t.Result
@@ -61,7 +59,7 @@ module TaskBuilder =
                 }
             methodBuilder.AwaitUnsafeOnCompleted(&awaiter, &stateStep)                
 
-        member inline __.Result(v:'r) =
+        member __.Result(v:'r) =
             methodBuilder.SetResult(v)
             cts.Dispose()
 
@@ -70,7 +68,7 @@ module TaskBuilder =
 
     let zero = Task.FromResult ()
 
-    let inline GenericTaskResultSet(t:Task<'out>,sm:StateMachine<'out>) =
+    let inline GenericTaskResultSet<'out>(t:Task<'out>,sm:StateMachine<'out>) =
         if t.IsCompleted then
             sm.Result( t.Result )
         else
@@ -87,13 +85,12 @@ module TaskBuilder =
                                             and  (TaskAwaiter< ^inp>) : (member GetResult : unit -> ^inp) 
                                             and ^abl : (member GetAwaiter : unit -> TaskAwaiter< ^inp> ) 
                                             >
-            (continuation : ^inp -> TypePass<'out>, abl : ^abl, sm : StateMachine<'out>) : TypePass<'out> =
+            (continuation : ^inp -> unit, abl : ^abl, sm : StateMachine<'out>) : unit =
                 let awt = (^abl : (member GetAwaiter : unit -> TaskAwaiter< ^inp>)(abl)) 
                 if awt.IsCompleted then
                     continuation (awt.GetResult())
                 else
-                    sm.Await(awt,continuation)
-                    TypePass<'out>()                
+                    sm.Await(awt,continuation)                
 
         // Plain Standard Binding
         ////////////////////////////
@@ -103,13 +100,12 @@ module TaskBuilder =
                                             //and ^abl :> IComparable
                                             //(TaskAwaiter) : (member GetResult : unit -> unit)
                                             ^abl : (member GetAwaiter : unit -> TaskAwaiter) >
-            (continuation : unit -> TypePass<'out>, abl : ^abl, sm : StateMachine<'out>) : TypePass<'out> =
+            (continuation : unit -> unit, abl : ^abl, sm : StateMachine<'out>) : unit =
                 let awt = (^abl : (member GetAwaiter : unit -> TaskAwaiter)(abl))
                 if awt.IsCompleted then
                     continuation ()
                 else
                     sm.Await(awt,continuation)
-                    TypePass<'out>()                
 
         // Standard Binding between awaits with configure await false
         //////////////////////////
@@ -134,19 +130,18 @@ module TaskBuilder =
         //////////////////////////
         static member inline GenericAwaitResult< ^abl, ^inp
                                             when ^abl : (member GetAwaiter : unit -> TaskAwaiter< ^inp>) >
-            (continuation : ^inp -> 'out, abl : ^abl,sm : StateMachine< 'out>) : TypePass<'out> =
+            (continuation : ^inp -> 'out, abl : ^abl,sm : StateMachine< 'out>) : unit =
                 let awt = (^abl : (member GetAwaiter : unit -> TaskAwaiter< ^inp>)(abl)) 
                 if awt.IsCompleted then
                     sm.Result(continuation (awt.GetResult()))
                 else
-                    sm.Await(awt, fun v -> v |> continuation |> sm.Result ; TypePass<'out>())
-                TypePass<'out>()                
+                    sm.Await(awt, fun v -> v |> continuation |> sm.Result)             
         
         
         // Unique overload to receive Task ReturnFrom
         //////////////////////////
         static member inline GenericAwaitTaskReturn< ^abl, ^inp when ^abl : (member GetAwaiter : unit -> TaskAwaiter< ^inp>) >
-            (continuation : ^inp -> Task<'out>, abl : ^abl, sm : StateMachine<'out>) : TypePass<'out> =
+            (continuation : ^inp -> Task<'out>, abl : ^abl, sm : StateMachine<'out>) : unit =
                 
                 let awt = (^abl : (member GetAwaiter : unit -> TaskAwaiter< ^inp>)(abl))
                 if awt.IsCompleted then
@@ -156,57 +151,104 @@ module TaskBuilder =
                 else
                     sm.Await(awt, fun v -> 
                         let t = continuation v                        
-                        GenericTaskResultSet(t,sm)
-                        TypePass<'out>()          
+                        GenericTaskResultSet(t,sm)                                  
                         )
-                TypePass<'out>()                             
-
-    type Priority3 = obj
-    type Priority2 = IComparable
-
-    type Bind = Priority1 with
-        static member inline ($) (_:Priority3, task: ^t) = fun (k: _ -> _) sm -> Binder<'r>.GenericAwait(k,task,sm)
-        //static member inline ($) (_:Priority2, task: ^t) = fun (k: _ -> _) sm -> Binder<'r>.GenericAwaitTaskReturn(k,task,sm)
-        static member        ($) (  Priority1, task: 't) = fun (k: _ -> _) sm -> Binder<'r>.GenericAwaitResult(k,task,sm)
-        //static member        ($) (  Priority1, task: 't) = fun (k: _ -> _) sm -> Binder<'r>.GenericAwaitPlain(k,task,sm)
-        static member inline Invoke task continuation sm = (Bind.Priority1 $ task) continuation sm    
-    
-
-
 
     type ParentInsensitiveTaskBuilder<'r>() =
         // These methods are consistent between the two builders.
         // Unfortunately, inline members do not work with inheritance.
         let mutable sm = Unchecked.defaultof<StateMachine<'r>> //lazy
+
+        member __.StateMachine = sm
         member inline __.Delay(f : unit -> _) = f
-        member inline __.Run(f : unit -> TypePass<'r>) = 
+        member __.Run(f : unit -> unit) = 
             sm <- StateMachine<'r>()
             sm.Run(f)
-        // member inline __.Run(f : unit -> Task<'r>) = f()
+        member __.Run(f : unit -> Task<'r>) = f()
 
-        // member inline __.Run(f : unit -> 'r) = Task.FromResult (f())
+        member __.Run(f : unit -> 'r) = Task.FromResult (f())
 
         member inline __.Zero() = zero
-        member inline __.Return(x:'r) = sm.Result(x) ; TypePass<'r>() // x
-        member inline __.ReturnFrom(task : 'r Task) = sm.Await(task) ; TypePass<'r>()
+        member inline __.Return(v:'r) = v // x
+        member inline __.ReturnFrom(task : 'r Task) = task 
 
-        // member inline __.Bind(task, continuation) : TypePass<'r> =
+        // member inline __.Bind(task, continuation) : unit =
         //     Bind.Invoke task continuation sm
 
-        member inline __.Bind(configurableTaskLike:^abl, continuation : ^inp -> TypePass<'r>) : TypePass<'r> =
-            Binder<'r>.GenericAwait         (continuation,configurableTaskLike,sm)
+        // member inline x.Bind(configurableTaskLike:^abl, continuation : ^inp -> unit) : unit =
+        //     Binder<'r>.GenericAwait         (continuation,configurableTaskLike,x.StateMachine)
 
-        // member inline __.Bind(configurableTaskLike:^abl, continuation : unit -> TypePass<'r>) : TypePass<'r> =
+        member inline x.Bind<  ^inp 
+                                    when (Task< ^inp>) : (member Result : ^inp )
+                                    and  (TaskAwaiter< ^inp>) : (member GetResult : unit -> ^inp) >
+                (abl: Task< ^inp>, continuation : ^inp -> unit) : unit =
+                let awt = abl.GetAwaiter() 
+                if awt.IsCompleted then
+                    awt.GetResult() |> continuation
+                else
+                    x.StateMachine.Await(awt,continuation)
+
+        member inline x.Bind< ^inp 
+                                    when (Task< ^inp>) : (member Result : ^inp )
+                                    and  (TaskAwaiter< ^inp>) : (member GetResult : unit -> ^inp) >
+                (abl: Task< ^inp>, continuation : ^inp -> Task<'r>) : unit =
+                let awt = abl.GetAwaiter()
+                if awt.IsCompleted then
+                    GenericTaskResultSet(awt.GetResult() |> continuation,x.StateMachine)
+                else
+                    x.StateMachine.Await(awt, fun v -> GenericTaskResultSet(continuation v,x.StateMachine))
+
+        member inline x.Bind< ^inp 
+                                    when (Task< ^inp>) : (member Result : ^inp )
+                                    and  (TaskAwaiter< ^inp>) : (member GetResult : unit -> ^inp) >
+                (abl: Task< ^inp>, continuation : ^inp -> 'r) : unit =
+                let awt = abl.GetAwaiter()                                
+                if awt.IsCompleted then
+                    x.StateMachine.Result(continuation (awt.GetResult()))
+                else
+                    x.StateMachine.Await(awt, fun v -> v |> continuation |> x.StateMachine.Result)  
+
+
+        /// Plain Task Overloads
+        //////////////////////////////////////
+
+        member inline x.Bind(abl: Task, continuation : unit -> unit) : unit =
+                let awt = abl.GetAwaiter() 
+                if awt.IsCompleted then
+                    continuation ()
+                else
+                    x.StateMachine.Await(awt,continuation)
+
+        member inline x.Bind(abl: Task, continuation : unit -> Task<'r>) : unit =
+                let awt = abl.GetAwaiter() 
+                if awt.IsCompleted then
+                    GenericTaskResultSet(continuation(),x.StateMachine)
+                else
+                    x.StateMachine.Await(awt, fun () -> GenericTaskResultSet( continuation () ,x.StateMachine) )
+
+        member inline x.Bind(abl: Task, continuation : unit -> 'r) : unit =
+                let awt = abl.GetAwaiter() 
+                if awt.IsCompleted then
+                    x.StateMachine.Result(continuation ())
+                else
+                    x.StateMachine.Await(awt,fun () -> continuation () |> x.StateMachine.Result)
+
+        // member inline x.Bind(subTask:StateMachine<'r> -> Task< ^a> , continuation : ^a -> unit) : unit =
+        //     Binder<'r>.GenericAwait(subTask sm, continuation,sm)
+                    
+        
+
+        // member inline __.Bind(configurableTaskLike:^abl, continuation : unit -> unit) : unit =
         //     Binder<'r>.GenericAwaitPlain    (continuation,configurableTaskLike,sm)
 
         // member inline __.Bind< ^abl, ^inp
         //                             when ^abl : (member GetAwaiter : unit -> TaskAwaiter< ^inp>) >
-        //     (configurableTaskLike:^abl, continuation : ^inp -> 'r ) : TypePass<'r> =
+        //     (configurableTaskLike:^abl, continuation : ^inp -> 'r ) : unit =
         //     Binder<'r>.GenericAwaitResult   (continuation,configurableTaskLike,sm)
 
         // member inline __.Bind< ^abl, ^inp 
         //                             when ^abl : (member GetAwaiter : unit -> TaskAwaiter< ^inp>) >
-        //     (configurableTaskLike:^abl, continuation : ^inp -> Task<'r> ) : TypePass<'r> =
+        //     (configurableTaskLike:^abl, continuation : ^inp -> Task<'r> ) : unit =
         //     Binder<'r>.GenericAwaitTaskReturn(continuation,configurableTaskLike,sm)
 
 
@@ -240,32 +282,25 @@ module TaskBuilder =
     //         Bind.Invoke task continuation sm
 
 
-let task = TaskBuilder.ParentInsensitiveTaskBuilder
-let inline ptask () = TaskBuilder.ParentInsensitiveTaskBuilder<_>()
+    
+// let inline ptask () = TaskBuilder.ParentInsensitiveTaskBuilder<_>()
 
-let t = Task.Factory.StartNew(fun () -> ())
+// let t = Task.Factory.StartNew(fun () -> ())
+module testing = 
 
+    let inline task< ^a> () = TaskBuilder.ParentInsensitiveTaskBuilder< ^a>()
+    let work1 = task () {
+            let t = Task.FromResult 2
+            let! a =  t //Task.Factory.StartNew(fun () -> ())
+            //let b = a + 1
+            return 3  
+        }
+    
+    let work2 = task () {
+            let str = "vatsd"
+            let! a = Task.FromResult str //Task.Factory.StartNew(fun () -> ())
+            do! Task.Factory.StartNew(fun () -> ())
+            //let b = a + 1
+            return "string"
+        }
 
-let work2 = ptask () {
-        let! a =  Task.FromResult "vatsd" //Task.Factory.StartNew(fun () -> ())
-        //let b = a + 1
-        return "string"
-    }
-
-let work1 = ptask () {
-        let t = Task.FromResult 2
-        let! a =  t //Task.Factory.StartNew(fun () -> ())
-        //let b = a + 1
-        return 3  
-    }
-let inline (?<-) (a:Task< ^a>,b: ^a -> ^b) = a.ContinueWith< ^b>(fun (t:Task< ^a>) -> b t.Result)   
-
-let tb =
-    (Task.FromResult 3) !> (fun v -> printf "%A" v)
-
-
-let {
-    let! x = ( TaskA )
-    ...
-}
-Bind(TaskA, x -> ... )
