@@ -5,7 +5,7 @@
     <TargetFrameworks>netstandard2.0</TargetFrameworks>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="Await.fs" />
+    <Compile Include="AwaitFun.fs" />
 
   </ItemGroup>
 </Project>
