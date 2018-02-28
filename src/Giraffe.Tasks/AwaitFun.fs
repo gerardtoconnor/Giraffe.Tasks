@@ -31,6 +31,11 @@ module TaskBuilder =
         let mutable awaiter = Unchecked.defaultof<ICriticalNotifyCompletion>
         let mutable cont = run // initial call will do nothing
         let cts = new CancellationTokenSource()
+
+        member __.SetAwaiter awt = awaiter <- awt
+        member __.SetContinuation fn = cont <- fn
+
+        member __.getMethodBuilder with get() = methodBuilder 
         
         // member __.Run< 'r>(fn:unit -> unit) =
         //     methodBuilder.Start(&this)
@@ -74,7 +79,9 @@ module TaskBuilder =
                         methodBuilder.Start(&this)
                     methodBuilder.Task
             member __.CancellationToken with get () = cts.Token
-            member __.Cancel() = cts.Cancel()
+            member __.Cancel() = 
+                cts.Cancel()
+                OperationCanceledException() |> methodBuilder.SetException
 
             member __.getMethodBuilder () = methodBuilder
             member __.setMethodBuilder mb = methodBuilder <- mb
@@ -171,18 +178,27 @@ module TaskBuilder =
     //                     GenericTaskResultSet(t,sm)                                  
     //                     )
 
+    type Binder< 'r> =
+        static member Await1(smr:byref<StateMachine<'r>>,awt:byref<TaskAwaiter<'a>>,cont:'a -> unit) =
+            let sm = &smr in sm.getMethodBuilder.AwaitUnsafeOnCompleted(&awt,&sm)
+
     type ParentInsensitiveTaskBuilder() =
         // These methods are consistent between the two builders.
         // Unfortunately, inline members do not work with inheritance.
         member inline __.Delay(f : unit -> _) = f
         member inline __.Run< ^r 
-                            when (TResult< ^r>) : ( member Invoke : IStateMachine< ^r> -> unit ) >
-                            (f : unit -> TResult< ^r>) : IStateMachine< ^r> = StateMachine< ^r>(f)                         :> IStateMachine< ^r>
-        member inline __.Run< ^r
-                                when (Task< ^r>) : (member Result : ^r )
-                                and  (TaskAwaiter< ^r>) : (member GetResult : unit -> ^r) >
-                            (f : unit -> Task< ^r>)    : IStateMachine< ^r> = f() |> ResultMachine<'r>                    :> IStateMachine< ^r>
-        member inline __.Run(f : unit -> ^r)          : IStateMachine< ^r> = f() |> Task.FromResult |> ResultMachine<'r> :> IStateMachine< ^r>
+                            when (StateMachine< ^r>) : (member Await : Task< ^r>  -> unit) >
+                            (f : unit -> StateMachine< ^r> -> unit) : IStateMachine< ^r> = 
+                            StateMachine< ^r>(f)  :> IStateMachine< ^r>
+        
+        // member inline __.Run< ^r
+        //                         when (Task< ^r>) : (member Result : ^r )
+        //                         and  (TaskAwaiter< ^r>) : (member GetResult : unit -> ^r) >
+        //                     (f : unit -> Task< ^r>)    : IStateMachine< ^r> = 
+        //                     f() |> ResultMachine<'r>                    :> IStateMachine< ^r>
+        
+        // member inline __.Run(f : unit -> ^r)          : IStateMachine< ^r> = 
+        //                     f() |> Task.FromResult |> ResultMachine<'r> :> IStateMachine< ^r>
 
         //member inline __.Zero() = Task.FromResult () |> ResultMachine<unit> :> IStateMachine<unit>
         // member inline __.Return(v: ^r) = v // x
@@ -215,11 +231,15 @@ module TaskBuilder =
                                     when (Task< ^inp>) : (member Result : ^inp )
                                     and  (TaskAwaiter< ^inp>) : (member GetResult : unit -> ^inp) >
                 (abl: Task< ^inp>, continuation : ^inp -> TResult< ^r>) : TResult< ^r> =
-                let awt = abl.GetAwaiter() 
+                let awt = abl.GetAwaiter()
                 if awt.IsCompleted then
                     awt.GetResult() |> continuation
                 else
-                    fun sm -> sm.Await(awt,continuation)
+                    fun sm -> 
+                        sm.SetAwaiter awt
+                        sm.SetContinuation (fun () -> awt.GetResult() |> continuation)
+                         
+                    //fun sm -> sm.Await(awt,continuation)
 
         // member inline __.Bind< ^inp, ^r 
         //                             when (Task< ^inp>) : (member Result : ^inp )
@@ -351,4 +371,8 @@ module testing =
             //let b = a + 1
             return "string"
         }
+
+    let work3 = task {
+        return 4
+    }
 

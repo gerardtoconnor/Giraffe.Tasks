@@ -6,9 +6,5 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="AwaitFun.fs" />
-<<<<<<< HEAD
-
-=======
->>>>>>> dca497b3e661aa0200dd8fa52fc2ae0422ffb1c2
   </ItemGroup>
 </Project>
