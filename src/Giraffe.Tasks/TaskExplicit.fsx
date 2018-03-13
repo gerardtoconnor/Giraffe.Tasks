@@ -1,4 +1,3 @@
-namespace GTOC
 
 open System
 open System.Threading.Tasks
@@ -59,6 +58,7 @@ module TaskBuilder =
             //     master.AwaitCont <- child
             //     master.AwaitNext()
 
+        /// Sets statemachine then awaits
         member __.AwaitDuo (v:IDuo<'r>) =
             if v.Await <> Unchecked.defaultof<ICriticalNotifyCompletion> then // catches when exceptions or cancelations should stop progression
                 v.StateMachine <- this //provides access to statemachine
@@ -75,13 +75,16 @@ module TaskBuilder =
             with get() =
                 if Object.ReferenceEquals(null,task) then
                     if Object.ReferenceEquals(null,master) then
-                        let typedMaster = run () |> MasterState<'r>
+                        let init = run ()
+                        init.StateMachine <- this
+                        let typedMaster = init |> MasterState<'r>
                         master <- typedMaster  // Starts Master state
                         task <- typedMaster.Task
                         resultFn <- typedMaster.SetResult                   
                 task
 
-        member __.CancellationToken with get () = master.CancellationTokenSource.Token
+        member __.CancellationToken 
+            with get () = master.CancellationTokenSource.Token
         member __.Cancel() = master.CancellationTokenSource.Cancel()
 
         // interface IAsyncStateMachine with 
@@ -114,11 +117,12 @@ module TaskBuilder =
             member __.Cancel () = ()
         new (sv:SWrap<'r>) = ResultState<'r>(sv.Value |> Task.FromResult)
 
+    // Hack wrapper to help inference differncitate result from Task<result>
     and SWrap<'r> =
         struct
             val Value : 'r
         end
-        new (v) = {Value = v}            
+        new (v) = {Value = v}
 
 
     let zero = Task.FromResult ()
@@ -178,19 +182,20 @@ module TaskBuilder =
             member __.MoveNext() = ()
             member __.SetStateMachine _ = ()
 
-    type ChldBind<'r,'c>(csm:AsyncState<'c>,cont:'c ->IDuo<'r>) =
-        let mutable sm = Unchecked.defaultof<AsyncState<'r>>
+    type ChldBind<'r,'c>(csm:AsyncState<'c>,cont:'c -> IDuo<'r>) =
+        let mutable psm = Unchecked.defaultof<AsyncState<'r>>
         let run = csm.Run
         do run.StateMachine <-  csm
         interface IDuo< 'r> with
             member __.StateMachine 
-                with get () = sm 
+                with get () = psm 
                 and set v =
+                    psm <- v
+                    csm.MasterState <- psm.MasterState
                     csm.SetResultFn (fun crv ->
                         let result = cont crv
-                        sm.AwaitDuo result
+                        psm.AwaitDuo result
                     ) 
-                    csm.MasterState <- v.MasterState // 
             member __.Await = run.Await // typeless representing child 'c 
             member __.MoveNext() = run.MoveNext()
             member __.SetStateMachine _ = ()
@@ -204,9 +209,10 @@ module TaskBuilder =
             member __.StateMachine 
                 with get () = sm 
                 and set v =
+                    sm <- v
                     csm.SetResultFn (fun crv ->
                         let result = cont crv
-                        sm.Result result.Value
+                        v.Result result.Value
                     ) 
                     csm.MasterState <- v.MasterState // 
             member __.Await = run.Await // typeless representing child 'c 
@@ -222,11 +228,11 @@ module TaskBuilder =
         interface IDuo< 'r> with
             member __.StateMachine 
                 with get () = sm 
-                and set v = 
+                and set v =     // statemachine set before provided to awaiter & movenext
                     let t = fn v.CancellationToken
                     awt <- t.GetAwaiter()
                     sm <- v // 
-            member __.Await =  awt :> ICriticalNotifyCompletion
+            member __.Await = awt :> ICriticalNotifyCompletion
             member __.MoveNext() = awt.GetResult() |> cont |> sm.AwaitDuo /// get next awaiter using this result, duo setter sets statemachine
             member __.SetStateMachine _ = ()
 
@@ -269,7 +275,7 @@ module TaskBuilder =
                 and set v = 
                     let t = fn v.CancellationToken
                     awt <- t.GetAwaiter()
-                    sm <- v // 
+                    sm <- v //
             member __.Await =  awt :> ICriticalNotifyCompletion
             member __.MoveNext() = 
                 let wrapped = cont () 
@@ -356,7 +362,6 @@ module TaskBuilder =
 
         // Cancelations Token passing
 
-
         member inline __.Bind<  ^inp, ^r 
                                     when (Task< ^inp>) : (member Result : ^inp )
                                     and  (TaskAwaiter< ^inp>) : (member GetResult : unit -> ^inp) >
@@ -377,34 +382,34 @@ module TaskBuilder =
 
 
 
-module testing = 
 
-    let task = TaskBuilder.ParentInsensitiveTaskBuilder()
-    let work1 = task {
-            let t = Task.FromResult 2
-            let! a =  t //Task.Factory.StartNew(fun () -> ())
-            let b = a + 1
-            let tb = Task.FromResult b 
-            return! tb
-        }
-    
-    
-    let work2 = task {
-            let str = "vatsd"
-            let! a = Task.FromResult str //Task.Factory.StartNew(fun () -> ())
-            printfn "a:%s" a
-            do! Task.Factory.StartNew(fun () -> ())
-            let! child = task {
-                let! ca = Task.FromResult 64356
-                return ca
-            }
-            printfn "child:%i" child
-            let! cancelableTaskString = (fun ct -> Task.FromResult "abc")  
-            //let b = a + 1
-            return cancelableTaskString
-        }
 
-    let work3 = task {
-        return 4
-    }
+let task = TaskBuilder.ParentInsensitiveTaskBuilder()
+// let work1 = task {
+//         let t = Task.FromResult 2
+//         let! a =  t //Task.Factory.StartNew(fun () -> ())
+//         let b = a + 1
+//         let tb = Task.FromResult b 
+//         return! tb
+//     }
+
+
+let work2 = task { 
+        let str = "vatsd"
+        let! a = Task.FromResult str //Task.Factory.StartNew(fun () -> ())
+        printfn "a:%s" a
+        //do! Task.Factory.StartNew(fun () -> ())
+        printfn "plain task executed"
+        let! child = task {
+            let! ca = Task.FromResult 64356
+            return ca
+        }
+        printfn "child:%i" child
+        //let! cancelableTaskString = (fun ct -> Task.FromResult "abc")  
+        //let b = a + 1
+        //printfn "cancel fn %s" cancelableTaskString
+        return "finsihed" //cancelableTaskString
+}
+
+work2.Task.ContinueWith<_>(fun (_ : Task) -> printfn "work2: %s" work2.Task.Result)
 
